@@ -283,19 +283,8 @@ function buildPane(which){
   if (which === 'title'){
     const row = document.createElement('div');
     row.className = 'row';
-    row.innerHTML = `<label>Замок</label>`;
-    const ctl = document.createElement('div');
-    ctl.className = 'ctl';
-    const cb = document.createElement('input');
-    cb.type = 'checkbox'; cb.checked = st.locked; cb.className = 'keep';
-    cb.style.cssText = 'accent-color:var(--accent);width:15px;height:15px;cursor:pointer';
-    const note = document.createElement('span');
-    note.style.cssText = 'color:var(--dim);font-size:11px';
-    cb.onchange = () => { st.locked = cb.checked; applyLock(); };
-    ctl.append(cb, note);
-    row.append(ctl);
+    row.innerHTML = `<label>Стиль</label><div class="ctl"><span style="color:var(--dim);font-size:11px">зафіксовано</span></div>`;
     pane.append(row);
-    buildPane.note = note;
   }
 
   for (const f of FIELDS){
@@ -362,15 +351,12 @@ function buildPane(which){
 buildPane('title'); buildPane('caption');
 
 function applyLock(){
-  const on = S.title.locked;
   const pane = document.querySelector('[data-pane="title"]');
   pane.querySelectorAll('input,select,textarea').forEach(el => {
-    if (el.classList.contains('keep')) return;
-    el.disabled = on;
-    el.closest('.row').style.opacity = on ? .3 : 1;
+    el.disabled = true;
+    el.closest('.row').style.opacity = .3;
   });
-  buildPane.note.textContent = on ? 'стиль зафіксовано' : 'вільно';
-  EL.title.style.cursor = on ? 'default' : 'grab';
+  EL.title.style.cursor = 'default';
 }
 
 document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => {

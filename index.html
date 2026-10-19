@@ -168,7 +168,8 @@
   select option{background:var(--lit);font-size:16px}
 
   input[type=range]{
-    -webkit-appearance:none;appearance:none;flex:1;height:14px;background:var(--cream-2);
+    /* min-width:0 — без нього доріжка не стискається і виштовхує число за край панелі */
+    -webkit-appearance:none;appearance:none;flex:1;min-width:0;height:14px;background:var(--cream-2);
     border:2px solid;border-color:var(--edge) var(--lit) var(--lit) var(--edge);outline:none;cursor:pointer;
   }
   input[type=range]::-webkit-slider-thumb{
@@ -229,6 +230,14 @@
   .pane{display:none}
   .pane.on{display:block}
 
+  .presets{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:10px}
+  .presets button{
+    flex:1 1 auto;font-family:var(--px);font-size:9px;padding:6px 4px;
+    background:var(--blue);color:var(--ink);
+  }
+  .presets button:hover{background:var(--yellow)}
+  .presets button.reset{background:var(--cream-2);color:var(--plum)}
+
   /* ---------- статус-бар ---------- */
   #status{
     flex:none;display:flex;align-items:center;gap:8px;
@@ -244,19 +253,17 @@
   @keyframes bl{50%{opacity:0}}
   @media (prefers-reduced-motion:reduce){.blink{animation:none}}
 
-  /* ---------- телефон: сторінка скролиться, прев'ю липне під баром ---------- */
+  /* ---------- телефон ----------
+     Скролиться панель, не сторінка. Липке прев'ю накривало нижні 46% екрана
+     і з'їдало дотики по контролах, що під нього заїхали. */
   @media (max-width:860px){
-    html,body{height:auto}
-    body{overflow:visible;min-height:100dvh}
-    #bar{position:sticky;top:0;z-index:60}
     #bar .ttl{font-size:19px}
     #bar .sub{display:none}
     #bar .sticker{font-size:8px}
 
-    #main{flex-direction:column;min-height:0}
+    #main{flex-direction:column}
     #stage{
-      position:sticky;top:46px;z-index:40;
-      flex:none;height:46dvh;min-height:220px;padding:10px;
+      flex:none;height:46dvh;min-height:200px;padding:10px;
       border-bottom:2px solid var(--plum);
     }
     /* відсоткова max-height тут не резолвиться — у #frame немає визначеної висоти */
@@ -266,9 +273,26 @@
     .desk{display:none}
     .layer::after{inset:-14px}   /* пальцю потрібна більша зона захвату */
 
-    #panel{width:100%;border-left:none;border-top:2px solid var(--edge)}
-    #scroll{flex:none;overflow:visible}
-    #status{position:sticky;bottom:0;z-index:50}
+    #panel{width:100%;flex:1;min-height:0;border-left:none;border-top:2px solid var(--edge)}
+  }
+
+  /* альбомна орієнтація: стосом панель отримує 65px висоти, тож кладемо поруч */
+  @media (max-width:860px) and (max-height:520px){
+    #main{flex-direction:row}
+    #stage{flex:1;height:auto;min-height:0;border-bottom:none;border-right:2px solid var(--plum)}
+    #photo{max-height:calc(100dvh - 100px)}
+    #panel{width:46%;max-width:320px;flex:none;border-top:none}
+    .row>label{width:84px;font-size:14px}
+    .num{width:34px}
+  }
+
+  /* палець товщий за курсор: більша доріжка і бігунець, і жодного скролу під час тягнення */
+  @media (pointer:coarse){
+    input[type=range]{height:24px;touch-action:none}
+    input[type=range]::-webkit-slider-thumb{width:22px;height:26px}
+    input[type=color]{width:38px;height:30px}
+    input[type=checkbox]{width:22px;height:22px}
+    .row{margin-bottom:9px}
   }
 </style>
 </head>
@@ -307,15 +331,8 @@
 
       <div class="sec">
         <h2>Фото</h2>
-        <div class="row"><label>Затемнення</label><div class="ctl">
-          <input type="range" id="dim" min="0" max="80" value="0"><span class="num" id="dim-n">0</span>
-        </div></div>
-        <div class="row"><label>Контраст</label><div class="ctl">
-          <input type="range" id="contrast" min="60" max="180" value="100"><span class="num" id="contrast-n">100</span>
-        </div></div>
-        <div class="row"><label>Зерно</label><div class="ctl">
-          <input type="range" id="grain" min="0" max="60" value="0"><span class="num" id="grain-n">0</span>
-        </div></div>
+        <div class="presets" id="presets"></div>
+        <div id="fxpane"></div>
       </div>
     </div>
 
@@ -562,37 +579,260 @@ function render(which){
   }
 }
 
-/* grain — одна невеличка текстура, запікається раз, не на кожен кадр */
-let grainURL = null;
-function makeGrain(){
+/* ------------------------------------------------------------------- fx */
+/* Прев'ю й експорт малює одна функція drawPhoto — інакше вони розходяться. */
+
+const PH = {
+  dim:0, contrast:100, sat:100, warm:0,
+  zoom:0, focus:40,
+  soft:'#ff9ecb', softAmt:0,
+  bloom:0, bloomR:35,
+  vig:0, grain:0,
+};
+
+const PH_FIELDS = [
+  {k:'zoom',    l:'Zoom blur',  min:0, max:100, step:1},
+  {k:'focus',   l:'Фокус',      min:0, max:100, step:1},
+  {k:'soft',    l:'Soft light', t:'color'},
+  {k:'softAmt', l:'Сила wash',  min:0, max:100, step:1},
+  {k:'bloom',   l:'Bloom',      min:0, max:100, step:1},
+  {k:'bloomR',  l:'Радіус',     min:0, max:100, step:1},
+  {k:'vig',     l:'Віньєтка',   min:0, max:100, step:1},
+  {k:'dim',     l:'Затемнення', min:0, max:80,  step:1},
+  {k:'contrast',l:'Контраст',   min:60,max:180, step:1},
+  {k:'sat',     l:'Насиченість',min:0, max:200, step:1},
+  {k:'warm',    l:'Тепло',      min:-100,max:100,step:1},
+  {k:'grain',   l:'Зерно',      min:0, max:60,  step:1},
+];
+
+const PRESETS = {
+  'глянець':  {bloom:38, bloomR:42, soft:'#ffd2a8', softAmt:30, vig:22, contrast:112, sat:116, warm:18, zoom:0,  grain:6},
+  'швидкість':{bloom:20, bloomR:30, soft:'#9ecbff', softAmt:18, vig:30, contrast:124, sat:104, warm:-8, zoom:42, focus:46, grain:8},
+  'плівка':   {bloom:14, bloomR:50, soft:'#ffb27a', softAmt:34, vig:34, contrast:96,  sat:88,  warm:26, zoom:0,  grain:30},
+  'холод':    {bloom:26, bloomR:38, soft:'#8fb8ff', softAmt:40, vig:38, contrast:130, sat:72,  warm:-34,zoom:12, focus:60, grain:12},
+};
+
+/* зерно — одна текстура, запікається раз, не на кожен кадр */
+let grainPat = null;
+(function makeGrain(){
   const n = 160, c = document.createElement('canvas');
   c.width = c.height = n;
-  const ctx = c.getContext('2d'), d = ctx.createImageData(n, n);
+  const g = c.getContext('2d'), d = g.createImageData(n, n);
   for (let i = 0; i < d.data.length; i += 4){
     const v = (Math.random() * 255) | 0;
     d.data[i] = d.data[i+1] = d.data[i+2] = v; d.data[i+3] = 255;
   }
-  ctx.putImageData(d, 0, 0);
-  grainURL = c.toDataURL();
-}
-makeGrain();
+  g.putImageData(d, 0, 0);
+  grainPat = c;
+})();
 
-const PH = { dim:0, contrast:100, grain:0 };
-for (const k of Object.keys(PH)){
-  const r = document.getElementById(k), n = document.getElementById(k + '-n');
-  r.oninput = () => { PH[k] = +r.value; n.textContent = r.value; applyPhoto(); };
-}
-function applyPhoto(){
-  photo.style.filter = `contrast(${PH.contrast}%) brightness(${100 - PH.dim}%)`;
-  frame.style.setProperty('--grain', PH.grain / 100);
-  let g = document.getElementById('grain-layer');
-  if (!g){
-    g = document.createElement('div'); g.id = 'grain-layer';
-    g.style.cssText = 'position:absolute;inset:0;pointer-events:none;background-size:160px 160px;mix-blend-mode:overlay';
-    g.style.backgroundImage = `url(${grainURL})`;
-    frame.insertBefore(g, EL.title);
+const fxOn = () => PH.zoom > 0 || PH.softAmt > 0 || PH.bloom > 0 || PH.vig > 0 ||
+                   PH.grain > 0 || PH.dim > 0 || PH.contrast !== 100 || PH.sat !== 100 || PH.warm !== 0;
+
+// два робочі канваси на весь час життя сторінки, а не на кожен кадр
+const tmp = [0, 1].map(() => document.createElement('canvas'));
+const fit = (c, w, h) => { if (c.width !== w || c.height !== h){ c.width = w; c.height = h; } return c.getContext('2d'); };
+
+// Safari не має ctx.filter — градацію рахуємо вручну, інакше вона там мовчки зникає
+const HAS_FILTER = typeof document.createElement('canvas').getContext('2d').filter === 'string';
+
+function grade(ctx, W, H){
+  if (HAS_FILTER){
+    ctx.save();
+    ctx.filter = `contrast(${PH.contrast}%) brightness(${100 - PH.dim}%) saturate(${PH.sat}%)`;
+    ctx.drawImage(photo, 0, 0, W, H);
+    ctx.restore();
+    return;
   }
-  g.style.opacity = PH.grain / 100;
+  ctx.drawImage(photo, 0, 0, W, H);
+  if (PH.contrast === 100 && PH.dim === 0 && PH.sat === 100) return;
+  const img = ctx.getImageData(0, 0, W, H), d = img.data;
+  const c = PH.contrast / 100, br = (100 - PH.dim) / 100, s = PH.sat / 100;
+  const lut = new Uint8ClampedArray(256);
+  for (let i = 0; i < 256; i++) lut[i] = (((i / 255 - .5) * c + .5) * br) * 255;
+  for (let i = 0; i < d.length; i += 4){
+    let r = lut[d[i]], g = lut[d[i+1]], b = lut[d[i+2]];
+    if (s !== 1){
+      const l = .2126 * r + .7152 * g + .0722 * b;
+      r = l + (r - l) * s; g = l + (g - l) * s; b = l + (b - l) * s;
+    }
+    d[i] = r; d[i+1] = g; d[i+2] = b;
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+function drawPhoto(ctx, W, H){
+  const S_ = W / 1200;                       // усі радіуси в частках ширини — інакше експорт не збігається
+
+  grade(ctx, W, H);
+
+  if (PH.zoom > 0){
+    // 18 проходів у повному розмірі коштували 80мс. Це розмиття — рахуємо дрібно і розтягуємо.
+    const zs = Math.min(1, 900 / Math.max(W, H));
+    const zw = Math.max(2, Math.round(W * zs)), zh = Math.max(2, Math.round(H * zs));
+
+    const src = fit(tmp[0], zw, zh);
+    src.clearRect(0, 0, zw, zh);
+    src.imageSmoothingQuality = 'high';
+    src.drawImage(ctx.canvas, 0, 0, W, H, 0, 0, zw, zh);
+
+    const blur = fit(tmp[1], zw, zh);
+    blur.clearRect(0, 0, zw, zh);
+    const n = 18, max = PH.zoom / 100 * 0.42;
+    for (let i = 0; i < n; i++){
+      const s = 1 + max * (i / (n - 1));
+      blur.globalAlpha = 1 / (i + 1);        // послідовне середнє, інакше краї вигорають
+      blur.drawImage(tmp[0], (zw - zw * s) / 2, (zh - zh * s) / 2, zw * s, zh * s);
+    }
+    blur.globalAlpha = 1;
+
+    if (PH.focus > 0){                       // діра в розмитті — центр лишається різким
+      const r = Math.max(zw, zh) * PH.focus / 100 * 0.75;
+      const g = blur.createRadialGradient(zw/2, zh/2, 0, zw/2, zh/2, r);
+      g.addColorStop(0, 'rgba(0,0,0,1)');
+      g.addColorStop(0.55, 'rgba(0,0,0,.85)');
+      g.addColorStop(1, 'rgba(0,0,0,0)');
+      blur.globalCompositeOperation = 'destination-out';
+      blur.fillStyle = g; blur.fillRect(0, 0, zw, zh);
+      blur.globalCompositeOperation = 'source-over';
+    }
+    ctx.save();
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(tmp[1], 0, 0, zw, zh, 0, 0, W, H);
+    ctx.restore();
+  }
+
+  if (PH.bloom > 0){
+    // розмиття через зменшення-збільшення: без ctx.filter, і швидше за нього
+    const div = 3 + PH.bloomR / 100 * 22;
+    const sw = Math.max(2, Math.round(W / div)), sh = Math.max(2, Math.round(H / div));
+    const a = fit(tmp[0], sw, sh);
+    a.clearRect(0, 0, sw, sh);
+    a.imageSmoothingQuality = 'high';
+    a.drawImage(ctx.canvas, 0, 0, sw, sh);
+    a.globalCompositeOperation = 'multiply';   // множення на себе гасить темне, лишає світле
+    a.drawImage(tmp[0], 0, 0);
+    a.globalCompositeOperation = 'source-over';
+
+    ctx.save();
+    ctx.imageSmoothingQuality = 'high';
+    ctx.globalCompositeOperation = 'screen';
+    ctx.globalAlpha = PH.bloom / 100 * 0.9;
+    ctx.drawImage(tmp[0], 0, 0, sw, sh, 0, 0, W, H);
+    ctx.restore();
+  }
+
+  if (PH.softAmt > 0){
+    ctx.save();
+    ctx.globalCompositeOperation = 'soft-light';
+    ctx.globalAlpha = PH.softAmt / 100;
+    ctx.fillStyle = PH.soft; ctx.fillRect(0, 0, W, H);
+    ctx.restore();
+  }
+
+  if (PH.warm !== 0){
+    ctx.save();
+    ctx.globalCompositeOperation = 'overlay';
+    ctx.globalAlpha = Math.abs(PH.warm) / 100 * 0.5;
+    ctx.fillStyle = PH.warm > 0 ? '#ff8a3d' : '#3da2ff';
+    ctx.fillRect(0, 0, W, H);
+    ctx.restore();
+  }
+
+  if (PH.vig > 0){
+    const g = ctx.createRadialGradient(W/2, H/2, Math.min(W,H) * 0.25, W/2, H/2, Math.max(W,H) * 0.72);
+    g.addColorStop(0, 'rgba(0,0,0,0)');
+    g.addColorStop(1, `rgba(0,0,0,${PH.vig / 100 * 0.9})`);
+    ctx.save(); ctx.fillStyle = g; ctx.fillRect(0, 0, W, H); ctx.restore();
+  }
+
+  if (PH.grain > 0){
+    const pat = ctx.createPattern(grainPat, 'repeat');
+    pat.setTransform(new DOMMatrix([S_, 0, 0, S_, 0, 0]));   // зерно однакове в прев'ю і в файлі
+    ctx.save();
+    ctx.globalCompositeOperation = 'overlay';
+    ctx.globalAlpha = PH.grain / 100;
+    ctx.fillStyle = pat; ctx.fillRect(0, 0, W, H);
+    ctx.restore();
+  }
+}
+
+/* прев'ю: рівно стільки пікселів, скільки видно на екрані, перемальовка тільки на rAF */
+const PREVIEW_MAX = 1600;
+const fxCanvas = document.createElement('canvas');
+fxCanvas.id = 'fx';
+fxCanvas.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;display:none;pointer-events:none';
+let fxQueued = false;
+
+function applyPhoto(){
+  if (!photo.naturalWidth) return;
+  if (!fxCanvas.parentNode) frame.insertBefore(fxCanvas, EL.title);
+  if (!fxOn()){ fxCanvas.style.display = 'none'; return; }
+  if (fxQueued) return;
+  fxQueued = true;
+  requestAnimationFrame(() => {
+    fxQueued = false;
+    const nw = photo.naturalWidth, nh = photo.naturalHeight;
+    // більше за видимий розмір малювати немає сенсу: на телефоні це вчетверо менше роботи
+    const want = (photo.clientWidth || nw) * (devicePixelRatio || 1);
+    const s = Math.min(1, PREVIEW_MAX / Math.max(nw, nh), want / nw);
+    const W = Math.max(2, Math.round(nw * s)), H = Math.max(2, Math.round(nh * s));
+    if (fxCanvas.width !== W || fxCanvas.height !== H){ fxCanvas.width = W; fxCanvas.height = H; }
+    const ctx = fxCanvas.getContext('2d');
+    ctx.clearRect(0, 0, W, H);
+    drawPhoto(ctx, W, H);
+    fxCanvas.style.display = 'block';
+  });
+}
+
+/* ------------------------------------------------------- fx controls ui */
+const fxPane = document.getElementById('fxpane');
+const fxInputs = {};
+
+for (const f of PH_FIELDS){
+  const row = document.createElement('div');
+  row.className = 'row';
+  row.innerHTML = `<label>${f.l}</label>`;
+  const ctl = document.createElement('div');
+  ctl.className = 'ctl';
+
+  if (f.t === 'color'){
+    const inp = document.createElement('input');
+    inp.type = 'color'; inp.value = PH[f.k];
+    const hex = document.createElement('input');
+    hex.type = 'text'; hex.value = PH[f.k]; hex.style.fontSize = '15px';
+    inp.oninput = () => { PH[f.k] = hex.value = inp.value; applyPhoto(); };
+    hex.oninput = () => { if(/^#[0-9a-f]{6}$/i.test(hex.value)){ PH[f.k] = inp.value = hex.value; applyPhoto(); } };
+    ctl.append(inp, hex);
+    fxInputs[f.k] = v => { inp.value = hex.value = v; };
+  } else {
+    const r = document.createElement('input');
+    r.type = 'range'; r.min = f.min; r.max = f.max; r.step = f.step; r.value = PH[f.k];
+    const n = document.createElement('span');
+    n.className = 'num'; n.textContent = PH[f.k];
+    r.oninput = () => { PH[f.k] = +r.value; n.textContent = r.value; applyPhoto(); };
+    ctl.append(r, n);
+    fxInputs[f.k] = v => { r.value = v; n.textContent = v; };
+  }
+  row.append(ctl);
+  fxPane.append(row);
+}
+
+function syncFx(){ for (const k in fxInputs) fxInputs[k](PH[k]); }
+
+const presetBar = document.getElementById('presets');
+for (const name of Object.keys(PRESETS)){
+  const b = document.createElement('button');
+  b.textContent = name;
+  b.onclick = () => { Object.assign(PH, PRESETS[name]); syncFx(); applyPhoto(); };
+  presetBar.append(b);
+}
+{
+  const b = document.createElement('button');
+  b.className = 'reset'; b.textContent = '✕ скинути';
+  const ZERO = {dim:0, contrast:100, sat:100, warm:0, zoom:0, focus:40, softAmt:0, bloom:0, bloomR:35, vig:0, grain:0};
+  b.onclick = () => { Object.assign(PH, ZERO); syncFx(); applyPhoto(); };
+  presetBar.append(b);
 }
 
 /* ----------------------------------------------------------- drag layers */
@@ -643,7 +883,7 @@ function setPhoto(f){
   };
   photo.src = url;
 }
-new ResizeObserver(() => render()).observe(frame);
+new ResizeObserver(() => { render(); applyPhoto(); }).observe(frame);
 
 /* ------------------------------------------------------------------ dice */
 const pick = a => a[(Math.random() * a.length) | 0];
@@ -672,19 +912,9 @@ document.getElementById('save').onclick = async () => {
   c.width = W; c.height = H;
   const ctx = c.getContext('2d');
 
-  ctx.filter = `contrast(${PH.contrast}%) brightness(${100 - PH.dim}%)`;
-  ctx.drawImage(photo, 0, 0, W, H);
-  ctx.filter = 'none';
-
-  if (PH.grain > 0){
-    const gi = new Image(); gi.src = grainURL; await gi.decode();
-    const pat = ctx.createPattern(gi, 'repeat');
-    ctx.save();
-    ctx.globalCompositeOperation = 'overlay';
-    ctx.globalAlpha = PH.grain / 100;
-    ctx.fillStyle = pat; ctx.fillRect(0, 0, W, H);
-    ctx.restore();
-  }
+  drawPhoto(ctx, W, H);
+  // робочі канваси щойно роздулись до повного розміру фото — віддаємо памʼять одразу
+  for (const t of tmp){ t.width = t.height = 0; }
 
   for (const k of ['title','caption']){
     const st = S[k];
